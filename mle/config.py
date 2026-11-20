@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     batch_size: int = 100  # messages per Postgres transaction
     batch_wait_seconds: float = 0.2  # flush a partial batch after this long
     pool_max: int = 10  # API database connections
-    embedding_model: str = "BAAI/bge-small-en-v1.5"  # used by "fastembed"; must output 384 dimensions
+    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384-d, English+Malay; must output 384 dimensions
 
 
 @lru_cache
