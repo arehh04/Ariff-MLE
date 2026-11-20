@@ -105,6 +105,9 @@ def main() -> None:
     print(
         f"  IQR over distinct description lengths: q1={q1:.0f} q3={q3:.0f} upper fence={q3 + 1.5 * (q3 - q1):.0f}"
     )
+    fence = q3 + 1.5 * (q3 - q1)
+    over = {x for x in descs if len(x) > fence}
+    print(f"  distinct descriptions longer than the fence: {len(over)}; of those, not longer than 512: {sum(len(x) <= 512 for x in over)}")  # fmt: skip
     print(
         f"  runaway repetition (phrase repeated 3+ times): {sum(bool(REPEAT.search(x)) for x in descs)}; longer than 512: {sum(n > 512 for n in lens)}"
     )

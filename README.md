@@ -48,10 +48,12 @@ The full contract is in [docs/04-api.md](docs/04-api.md). The API and the consum
 ## Tests and checks
 ```bash
 uv run ruff check . && uv run ruff format --check .
-uv run pytest -q                       # needs Postgres from `docker compose up`; about 3 minutes
+uv run pytest -q                       # needs Postgres and RabbitMQ from `docker compose up`; about 3 minutes
 uv run pytest tests/unit -q            # no Docker needed
 ```
-Integration tests use a separate database, `companies_test` (created automatically), never the dev database `companies`.
+Integration tests use a separate database, `companies_test` (created automatically), never the dev database `companies`,
+and their own throwaway RabbitMQ queues, never `company-events`. If Postgres or RabbitMQ is not running they are skipped
+locally, but they fail when `CI` is set.
 They use real Postgres + pgvector and a fast hashing embedder, so they do not need the model.
 
 Evidence scripts (with the API running where noted):
@@ -59,8 +61,9 @@ Evidence scripts (with the API running where noted):
 uv run python -m scripts.reconcile                 # database vs an independent fold of the feed
 uv run python -m scripts.bench                     # latency of /similar + EXPLAIN ANALYZE (API on :8000)
 uv run python -m scripts.eval_quality              # deep dive: recommendation quality, English vs Malay
-uv run python scripts/eval_embeddings.py           # earlier model comparison on industry labels
+uv run python -m scripts.eval_embeddings           # earlier model comparison on industry labels
 uv run python scripts/profile_feed.py              # what is in the feed
+uv run python -m scripts.check_recall              # does the HNSW top-10 equal the exact top-10? (dev database)
 ```
 
 ## Container image
@@ -69,17 +72,18 @@ One image runs both processes (non-root, model baked in at build time, about 1.1
 docker build -t mle:latest .                                    # just build
 docker run --rm -p 8000:8000 --network <compose network> \
   -e MLE_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/companies mle:latest
-docker run --rm --network <compose network> \
+docker run --rm --network <compose network> --no-healthcheck \
   -e MLE_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/companies \
   -e MLE_RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/ mle:latest python -m mle.consumer
 ```
-`<compose network>` is `<repo directory name>_default` (see `docker network ls`). CI (`.github/workflows/ci.yml`) runs
+`<compose network>` is `<repo directory name>_default` (see `docker network ls`). The image's health check probes the
+API's `/healthz`, so the consumer is run with `--no-healthcheck` (otherwise Docker reports it unhealthy). CI (`.github/workflows/ci.yml`) runs
 ruff and pytest against the same pgvector image as `docker-compose.yml`.
 
 ## Configuration (environment variables)
 | Variable | Default | Meaning |
 |---|---|---|
-| `POSTGRES_PORT`, `RABBITMQ_PORT`, `RABBITMQ_UI_PORT` | 5432, 5672, 15672 | host ports for compose (and for the default URLs below) |
+| `POSTGRES_PORT`, `RABBITMQ_PORT`, `RABBITMQ_UI_PORT` | 5432, 5672, 15672 | host ports for compose, and for the default database and broker URLs below (including the test database) |
 | `MLE_DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/companies` | Postgres connection |
 | `MLE_RABBITMQ_URL` | `amqp://guest:guest@localhost:5672/` | RabbitMQ connection |
 | `MLE_EMBEDDER` | `fastembed` | `fastembed` (real model) or `hashing` (offline placeholder, much lower quality) |
@@ -87,7 +91,7 @@ ruff and pytest against the same pgvector image as `docker-compose.yml`.
 | `MLE_BATCH_SIZE` | 100 | messages per Postgres transaction |
 | `MLE_BATCH_WAIT_SECONDS` | 0.2 | flush a partial batch after this long |
 | `MLE_POOL_MAX` | 10 | API database connections |
-| `TEST_DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/companies_test` | integration tests (must end in `companies_test`) |
+| `TEST_DATABASE_URL` | `postgresql://postgres:postgres@localhost:$POSTGRES_PORT/companies_test` | integration tests (must end in `companies_test`) |
 
 The defaults are the docker-compose credentials (synthetic data, no secrets). RabbitMQ UI: http://localhost:15672 (guest/guest).
 

@@ -6,6 +6,7 @@ import pytest
 from mle import consumer
 from mle.config import Settings
 from mle.consumer import _gather
+from mle.embedding import EmbedderUnavailable
 from mle.repository import BatchResult
 
 FAST = Settings(batch_size=3, batch_wait_seconds=0.05)
@@ -99,3 +100,11 @@ async def test_stop_during_an_outage_gives_up_instead_of_hanging(outage, monkeyp
     with pytest.raises(consumer.Stopping):
         await asyncio.wait_for(consumer._write_with_retry(None, Settings(), None, ["m"], stop), 2)
     assert len(calls) == 1
+
+
+async def test_model_outage_is_retried_with_back_off_like_a_database_outage(outage):
+    calls = outage(fail_times=2, error=EmbedderUnavailable("model gone"))
+    first = FakeConn()
+    conn, result = await consumer._write_with_retry(first, Settings(), None, ["m"], asyncio.Event())
+    assert len(calls) == 3 and result.events_new == 1  # same batch, retried, never dropped
+    assert conn is first and not first.closed  # the database connection was fine, so it is kept

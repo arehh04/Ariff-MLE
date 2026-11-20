@@ -1,7 +1,7 @@
 """Embedders: turn text into 384-d unit vectors. The schema fixes `vector(384)`.
 
-`embed` raises UnembeddableText for a text it cannot handle (the write path rejects that one message); any other
-exception means infrastructure trouble (model missing, process down) and the batch is retried, not rejected.
+`embed` raises UnembeddableText for a text it cannot handle (the write path rejects that one message); EmbedderUnavailable
+means the model itself is not working: infrastructure trouble, so the batch is retried, not rejected.
 """
 
 import hashlib
@@ -14,6 +14,10 @@ from typing import Protocol
 from mle.config import Settings
 
 DIM = 384
+
+
+class EmbedderUnavailable(RuntimeError):
+    """The model itself failed (crashed, could not run). Infrastructure trouble: the consumer retries with back-off."""
 
 
 class UnembeddableText(ValueError):
@@ -67,7 +71,10 @@ class FastEmbedEmbedder:
         self._model = TextEmbedding(model_name=model_name)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        vectors = [v.tolist() for v in self._model.embed(texts)]
+        try:
+            vectors = [v.tolist() for v in self._model.embed(texts)]
+        except Exception as exc:  # the ONNX runtime can raise many types; all mean "the model is not working"
+            raise EmbedderUnavailable(f"{self.name} failed: {exc}") from exc
         for v in vectors:
             if len(v) != DIM:
                 raise RuntimeError(f"{self.name} outputs {len(v)} dimensions, the schema needs {DIM}")

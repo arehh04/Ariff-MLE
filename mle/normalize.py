@@ -15,11 +15,16 @@ MALAYSIA = timezone(timedelta(hours=8))
 _MIN_YEAR, _MAX_YEAR = 2000, 2100
 
 
+def _scrub(value: str) -> str:
+    """Replace lone surrogates (valid JSON like "\\ud800", but not encodable as UTF-8) with U+FFFD."""
+    return value if value.isascii() else value.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
+
+
 def normalize_registration_number(value: object) -> str | None:
     """Identity of a company: a string, stripped and upper-cased. Non-strings (e.g. ints) are junk."""
     if not isinstance(value, str):
         return None
-    normalised = value.strip().upper()
+    normalised = _scrub(value).strip().upper()
     return normalised or None
 
 
@@ -78,8 +83,10 @@ def normalize_state(value: object) -> str | None:
     return _STATE_BY_KEY.get(key) or _STATE_ALIASES.get(key) or text.title()
 
 
-# A phrase of 8+ characters followed by itself at least twice more (so 3+ copies in total).
-_REPEATED_PHRASE = re.compile(r"(.{8,}?)(?:\s*\1){2,}", re.DOTALL)
+# A phrase of 8-256 characters followed by itself at least twice more (so 3+ copies in total). The upper bound keeps
+# the search linear in the text length; an unbounded phrase made it quadratic (20,000 characters took ~8 s).
+_REPEATED_PHRASE = re.compile(r"(.{8,256}?)(?:\s*\1){2,}", re.DOTALL)
+_MAX_INPUT = 20_000  # shortcut: look at no more than this per field (real texts are < 3,400); upgrade if a longer runaway matters
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -91,7 +98,7 @@ def clean_text(value: object, max_chars: int = 512) -> str | None:
     """
     if not isinstance(value, str):
         return None
-    text = _WHITESPACE.sub(" ", value.replace("\x00", "")).strip()
+    text = _WHITESPACE.sub(" ", _scrub(value[:_MAX_INPUT]).replace("\x00", "")).strip()
     text = _REPEATED_PHRASE.sub(r"\1", text)
     if len(text) > max_chars:
         cut = text[:max_chars]
@@ -215,7 +222,8 @@ def parse_message(message_id: str | None, body: bytes) -> Event | Rejected:
             warnings.append("description_over_cap")
 
     source = next(
-        (v for v in (payload.get("source"), payload.get("ingestedBy")) if isinstance(v, str) and v), None
+        (_scrub(v) for v in (payload.get("source"), payload.get("ingestedBy")) if isinstance(v, str) and v),
+        None,
     )
     return Event(
         registration_number=registration,

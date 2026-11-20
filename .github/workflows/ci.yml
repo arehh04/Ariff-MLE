@@ -18,6 +18,12 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres -d companies" --health-interval 2s
           --health-timeout 3s --health-retries 30
+      rabbitmq:
+        image: rabbitmq:3.13.7-management # same image as docker-compose.yml
+        ports: ["5672:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity" --health-interval 3s
+          --health-timeout 5s --health-retries 30
     env:
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/companies_test
     steps:

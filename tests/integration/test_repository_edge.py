@@ -1,5 +1,6 @@
 """Edge cases of the write path and the schema."""
 
+import dataclasses
 import json
 import threading
 
@@ -268,3 +269,17 @@ def test_rejected_events_collapse_identical_poison_by_database_constraint(conn):
     conn.execute(sql)
     with pytest.raises(psycopg.errors.UniqueViolation):
         conn.execute(sql)
+
+
+def test_text_that_cannot_be_encoded_rejects_only_that_message(conn, embedder):
+    """A lone surrogate is not a psycopg.DataError (it is a UnicodeEncodeError); it must still not sink the batch."""
+    good = make_event("SYN-000001", TS, companyName="Fine", natureOfBusiness="Fine text")
+    bad = dataclasses.replace(
+        make_event("SYN-000002", TS, natureOfBusiness="x"), company_name="bad \ud800 name"
+    )
+    result = process_batch_isolated(conn, embedder, [good, bad])
+    assert {r[0] for r in conn.execute("SELECT registration_number FROM companies").fetchall()} == {
+        "SYN-000001"
+    }
+    assert conn.execute("SELECT reason FROM rejected_events").fetchall() == [("processing_error",)]
+    assert result.rejected == 1

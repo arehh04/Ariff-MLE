@@ -12,8 +12,18 @@ from mle import db
 from mle.embedding import UnembeddableText
 from mle.normalize import Event, parse_message
 
-TEST_DSN = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/companies_test")
+TEST_DSN = os.environ.get(
+    "TEST_DATABASE_URL",
+    f"postgresql://postgres:postgres@localhost:{os.environ.get('POSTGRES_PORT', '5432')}/companies_test",
+)
 TEST_DBNAME = conninfo_to_dict(TEST_DSN)["dbname"]
+
+
+def service_unavailable(message: str) -> None:
+    """Skip when a service is missing on a laptop, but FAIL in CI, where a missing service must not look green."""
+    if os.environ.get("CI"):
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 class CountingEmbedder:
@@ -58,7 +68,7 @@ def test_dsn() -> str:
                     psycopg.sql.SQL("CREATE DATABASE {}").format(psycopg.sql.Identifier(TEST_DBNAME))
                 )
     except psycopg.OperationalError as exc:
-        pytest.skip(f"Postgres not reachable (run `just up`): {exc}")
+        service_unavailable(f"Postgres not reachable (run `just up`): {exc}")
     db.migrate(TEST_DSN)
     return TEST_DSN
 

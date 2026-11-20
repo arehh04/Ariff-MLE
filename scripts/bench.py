@@ -47,11 +47,12 @@ def explain(reg: str) -> str:
     with db.connect() as conn:
         company = repository.get_company(conn, reg)
         params = {
-            "q": company["embedding"], "reg": reg, "own_state": company["state"], "include_struck_off": True,
+            "q": company["embedding"], "model": company["embedding_model"], "reg": reg, "own_state": company["state"],
+            "include_struck_off": True,
             "state": None, "industry": None, "limit": 10, "pool": 100,
         }  # fmt: skip
         with conn.transaction():
-            conn.execute("SET LOCAL hnsw.ef_search = 200")
+            conn.execute("SELECT set_config('hnsw.ef_search', %s, true)", (str(repository._EF_SEARCH),))
             rows = conn.execute("EXPLAIN (ANALYZE, BUFFERS) " + repository._SIMILAR, params).fetchall()
     return "\n".join(r[0] for r in rows)
 

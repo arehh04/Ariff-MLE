@@ -242,19 +242,19 @@ def process_batch_isolated(
 ) -> BatchResult:
     """Like `process_batch`, but one bad message cannot sink the batch.
 
-    Data-level errors (psycopg.DataError, or UnembeddableText from the embedder) -> retry message by message and store the
+    Data-level errors (psycopg.DataError, UnicodeError for text Postgres cannot encode, or UnembeddableText) -> retry message by message and store the
     offender in `rejected_events` as `processing_error`. Anything else (OperationalError, a dead connection, ...)
     propagates untouched so the consumer does not ack and retries with back-off.
     """
     try:
         return process_batch(conn, embedder, messages)
-    except psycopg.DataError, UnembeddableText:
+    except psycopg.DataError, UnembeddableText, UnicodeError:
         pass  # the failed transaction was rolled back; fall through to one-by-one
     total = BatchResult()
     for message in messages:
         try:
             total += process_batch(conn, embedder, [message])
-        except (psycopg.DataError, UnembeddableText) as exc:
+        except (psycopg.DataError, UnembeddableText, UnicodeError) as exc:
             if isinstance(message, Rejected):
                 raise
             raw = json.dumps({"error": f"{type(exc).__name__}: {exc}", "event": asdict(message)}, default=str)
@@ -282,6 +282,7 @@ FROM (
            updated_at_missing, embedding <=> %(q)s AS distance
     FROM companies
     WHERE embedding IS NOT NULL
+      AND embedding_model = %(model)s  -- vectors from different models are not comparable
       AND registration_number <> %(reg)s
       AND (%(include_struck_off)s OR status = 'active')
       AND (%(state)s::text IS NULL OR state = %(state)s)
@@ -316,9 +317,12 @@ def similar(
     """Top `limit` companies closest to `company` by cosine distance. `company` comes from get_company()."""
     with conn.transaction():
         # Filters are applied after the index scan, so look at more candidates than the default 40 to still fill `limit`.
-        conn.execute("SET LOCAL hnsw.ef_search = 200")  # keep equal to _EF_SEARCH
+        conn.execute(
+            "SELECT set_config('hnsw.ef_search', %s, true)", (str(_EF_SEARCH),)
+        )  # true = this transaction only
         params = {
-            "q": company["embedding"], "reg": company["registration_number"], "own_state": company["state"],
+            "q": company["embedding"], "model": company["embedding_model"], "reg": company["registration_number"],
+            "own_state": company["state"],
             "include_struck_off": include_struck_off, "state": state, "industry": industry, "limit": limit,
             "pool": min(_EF_SEARCH, max(100, 4 * limit)),
         }  # fmt: skip

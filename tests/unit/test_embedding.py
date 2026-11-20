@@ -3,7 +3,7 @@ import math
 import pytest
 
 from mle.config import Settings
-from mle.embedding import DIM, HashingEmbedder, make_embedder
+from mle.embedding import DIM, EmbedderUnavailable, FastEmbedEmbedder, HashingEmbedder, make_embedder
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -60,3 +60,26 @@ def test_settings_honour_compose_ports(monkeypatch):
 def test_mle_prefix_overrides(monkeypatch):
     monkeypatch.setenv("MLE_EMBEDDER", "hashing")
     assert Settings().embedder == "hashing"
+
+
+def test_model_failure_is_unavailable_but_a_wrong_dimension_is_a_plain_error():
+    """A crashing model is infrastructure (retry); a model with the wrong output size is a misconfiguration (fail fast)."""
+    import numpy as np
+
+    class Boom:
+        def embed(self, texts):
+            raise ValueError("onnx exploded")
+
+    class TooShort:
+        def embed(self, texts):
+            return [np.zeros(3) for _ in texts]
+
+    embedder = FastEmbedEmbedder.__new__(FastEmbedEmbedder)  # skip loading the real model
+    embedder.name = "stub"
+    embedder._model = Boom()
+    with pytest.raises(EmbedderUnavailable):
+        embedder.embed(["x"])
+    embedder._model = TooShort()
+    with pytest.raises(RuntimeError) as caught:
+        embedder.embed(["x"])
+    assert not isinstance(caught.value, EmbedderUnavailable)

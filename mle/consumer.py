@@ -17,7 +17,7 @@ from aio_pika.exceptions import AMQPError
 
 from mle import db
 from mle.config import Settings, get_settings
-from mle.embedding import Embedder, make_embedder
+from mle.embedding import Embedder, EmbedderUnavailable, make_embedder
 from mle.normalize import parse_message
 from mle.repository import BatchResult, process_batch_isolated
 from producer.publish import QUEUE
@@ -57,11 +57,13 @@ async def _write_with_retry(
             if conn is None or conn.closed:
                 conn = await asyncio.to_thread(db.connect, settings.database_url)
             return conn, await asyncio.to_thread(process_batch_isolated, conn, embedder, parsed)
-        except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
-            log.warning("database unavailable (%s); retrying in %.0fs, batch not acked", exc, delay)
-            if conn is not None:
+        except (psycopg.OperationalError, psycopg.InterfaceError, EmbedderUnavailable) as exc:
+            log.warning("database or model unavailable (%s); retrying in %.0fs, batch not acked", exc, delay)
+            if conn is not None and isinstance(
+                exc, psycopg.Error
+            ):  # a model failure leaves the connection fine
                 await asyncio.to_thread(conn.close)
-            conn = None
+                conn = None
             try:
                 await asyncio.wait_for(stop.wait(), delay)  # a sleep that Ctrl-C can interrupt
             except TimeoutError:
@@ -70,17 +72,19 @@ async def _write_with_retry(
                 raise Stopping from exc
 
 
-async def run(settings: Settings, embedder: Embedder, stop: asyncio.Event) -> BatchResult:
+async def run(
+    settings: Settings, embedder: Embedder, stop: asyncio.Event, queue_name: str = QUEUE
+) -> BatchResult:
     await asyncio.to_thread(db.migrate, settings.database_url)
     connection = await aio_pika.connect_robust(settings.rabbitmq_url)
     channel = await connection.channel()
     await channel.set_qos(prefetch_count=2 * settings.batch_size)
     queue = await channel.declare_queue(
-        QUEUE, durable=True
+        queue_name, durable=True
     )  # exactly as the registry declares it: nothing else
     inbox: asyncio.Queue[AbstractIncomingMessage] = asyncio.Queue()
     consumer_tag = await queue.consume(inbox.put)  # manual acks: no_ack is False by default
-    log.info("consuming %s (embedder %s, batch %d)", QUEUE, embedder.name, settings.batch_size)
+    log.info("consuming %s (embedder %s, batch %d)", queue_name, embedder.name, settings.batch_size)
 
     conn: psycopg.Connection | None = None
     totals = BatchResult()

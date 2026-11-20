@@ -1,7 +1,7 @@
 # One image for both processes: the API (default CMD) and the consumer (`python -m mle.consumer`).
 FROM python:3.14-slim
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /usr/local/bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_NO_CACHE=1 UV_PROJECT_ENVIRONMENT=/opt/venv \
     PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 FASTEMBED_CACHE_PATH=/opt/models
@@ -22,7 +22,7 @@ COPY migrations ./migrations
 COPY producer ./producer
 
 EXPOSE 8000
-# python, not curl: the slim image has no curl.
+# python, not curl: the slim image has no curl. This probes the API; run the consumer with `--no-healthcheck`.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
 CMD ["uvicorn", "mle.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

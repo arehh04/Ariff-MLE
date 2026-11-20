@@ -339,7 +339,9 @@ HOSTILE = ["'; DROP TABLE companies; --", "Robert'); DELETE FROM company_events;
 def test_hostile_text_is_stored_verbatim_and_cannot_inject_through_filters(client, conn, text):
     process_batch(
         conn,
-        CountingEmbedder(),
+        CountingEmbedder(
+            name=AngleEmbedder.name
+        ),  # same model name as the fixture, or it is (rightly) not a neighbour
         [make_event("SYN-000200", TS, companyName=text, natureOfBusiness=text, industry=text)],
     )
     stored = conn.execute(
@@ -360,3 +362,15 @@ def test_hostile_text_is_stored_verbatim_and_cannot_inject_through_filters(clien
 
     assert conn.execute("SELECT count(*) FROM companies").fetchone()[0] == 10  # nothing dropped or deleted
     assert conn.execute("SELECT count(*) FROM company_events").fetchone()[0] == events_before
+
+
+def test_vectors_from_another_model_are_never_compared(client, conn):
+    """After a partial model swap, cosine distance between two different models means nothing: only same-model rows count."""
+    assert "SYN-000102" in regs(similar(client))
+    conn.execute(
+        "UPDATE companies SET embedding_model = 'other-model' WHERE registration_number = 'SYN-000102'"
+    )
+    assert "SYN-000102" not in regs(
+        similar(client)
+    )  # a different model's vector is not a neighbour of SYN-000101
+    assert similar(client, "SYN-000102").json()["results"] == []  # and it has no same-model neighbours itself

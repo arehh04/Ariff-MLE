@@ -8,7 +8,7 @@ report precision@k = share of the top-k that share the query's industry.
   mono   = candidates are in the same language
   masked = city names replaced by CITY first, so shared tokens like "Ipoh" cannot give a model free credit
 
-Run: uv run python scripts/eval_embeddings.py [--models name ...] [--cuda]
+Run: uv run python -m scripts.eval_embeddings [--models name ...] [--cuda]
 Heuristic limits: the Malay/English split is a keyword list, and industry match is a proxy for "similar company".
 """
 

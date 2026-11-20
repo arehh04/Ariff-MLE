@@ -43,7 +43,7 @@ From `uv run python scripts/profile_feed.py` (2,518 lines) and the reconcile out
 Not in `docs/02-feed-findings.md`, or different from it:
 - The profile counts 58 absent-or-empty descriptions (docs say 51), and 178 distinct raw descriptions (172 after cleaning).
 - The largest group of companies sharing one description is **59** (docs and an old code comment said ~43). I fixed the comment.
-- The IQR upper fence of description lengths is 96, but the code caps at 512. No description is between 96 and 512 characters, so both flag the same 5 distinct runaway texts (checked with a one-off script, not kept).
+- The IQR upper fence of description lengths is 96, but the code caps at 512. No description is between 96 and 512 characters, so both flag the same 5 distinct runaway texts (`uv run python scripts/profile_feed.py` prints it: 5 distinct descriptions are over the fence, and none of them is 512 characters or shorter).
 - 68 byte-identical lines = 63 duplicate events + 5 duplicate rejects. This is arithmetic from the numbers above, not a separate check.
 
 ## 3. Decisions
@@ -52,15 +52,17 @@ Not in `docs/02-feed-findings.md`, or different from it:
 | State model | Append-only `company_events` (key: registration number + content hash) and a `companies` projection | Order independence and replay safety fall out of the model; nothing is ever lost | One row with "update if newer": not order independent once null-merging is added |
 | Latest wins | Per field, newest non-null by (`updatedAt` DESC, hash DESC) | Deterministic, ignores arrival order, a newer null cannot erase | Last write wins by arrival |
 | Bad data | Store raw in `rejected_events` (identical raws counted in `seen_count`) and ack | The queue has no dead-letter exchange and cannot get one; requeueing a poison message loops forever | Requeue / drop |
-| Acks | After the transaction commits; infra errors back off (1 s doubling to 30 s) and are not acked | At-least-once delivery means a crash after commit only causes a harmless duplicate | Ack on receipt |
+| Acks | After the transaction commits (tested against a real broker: at the k-th ack at least k events are committed; a crash before commit leaves every message on the queue) | At-least-once delivery means a crash after commit only causes a harmless duplicate | Ack on receipt |
+| Failure policy | Bad data: reject and ack. Database or model down (`EmbedderUnavailable`): not acked, retried with back-off (1 s doubling to 30 s). A wrong-size model output or a code bug: the consumer stops (fail fast, nothing acked) | A retry loop cannot fix a misconfiguration, and stopping loses nothing because nothing was acked | Retry everything, or reject everything |
+| Text hygiene | Lone surrogates (valid JSON like `"\ud800"`, not encodable as UTF-8) become U+FFFD; NUL is dropped; only the first 20,000 characters of a field are examined; phrases of 8-256 characters repeated 3+ times collapse to one copy | One such message used to crash the consumer; the unbounded repeat regex took 8 s on 20,000 characters | Reject the whole message; unbounded regex |
 | Concurrency | `pg_advisory_xact_lock(hashtextextended(reg, 0))` per company, taken in sorted order | Two consumers cannot project from a snapshot that misses the other's uncommitted event; sorted order prevents deadlock | No lock (fails the concurrency test), table lock (serialises everything) |
 | Batching | Up to 100 messages or 0.2 s, one transaction | Fewer round trips; each distinct text embedded once per batch | One transaction per message |
 | Embedding reuse | Same text and model keeps the stored vector; identical text elsewhere reuses its vector; otherwise embed | The feed has ~172 distinct texts for 2,000 companies | Embed every message |
 | Struck-off | Company kept with `status`; default role `portal` hides it (including as the subject, 404), `analyst` sees it; a newer upsert reactivates | Deregistered is not "lost"; role is a stub header, not auth | Delete the row |
-| Query shape | Inner `ORDER BY embedding <=> $vector LIMIT pool` (keeps the HNSW index usable), outer sort by distance, same state, registration number; `hnsw.ef_search = 200` | Filters after the index scan would otherwise defeat it; the outer sort makes ties deterministic | Filter and tie-break in one query (planner stops using the index) |
+| Query shape | Inner `ORDER BY embedding <=> $vector LIMIT pool` (keeps the HNSW index usable), outer sort by distance, same state, registration number; `hnsw.ef_search = 200`; only rows with the same `embedding_model` as the query company are compared | Filters after the index scan would otherwise defeat it; the outer sort makes ties deterministic; cosine distance between two different models means nothing | Filter and tie-break in one query (planner stops using the index) |
 | Errors | RFC 7807 `application/problem+json`, no stack traces | Contract in `docs/04-api.md`; portal branches on `status` | Ad hoc JSON |
 | Embedding model | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-d, CPU); hashing only for tests and as a fallback | Section 6: the English-only suggestion is worse than hashing on Malay queries | `BAAI/bge-small-en-v1.5` (the suggested default) |
-| Model name | Stored on every row | A model swap re-embeds touched companies; mixed models are detectable | Implicit global model |
+| Model name | Stored on every row | A model swap re-embeds touched companies; the similarity query only compares rows of one model, so during a partial swap a company has fewer neighbours until it is re-embedded | Implicit global model |
 | SQL | All in `mle/repository.py`, parameterised, no ORM | One place to audit; no string-built SQL | ORM, or Alembic (one idempotent migration file does the job) |
 | Image | One image for API and consumer, model baked in at build, non-root | No download at start-up | Two images |
 
@@ -76,7 +78,8 @@ Not in `docs/02-feed-findings.md`, or different from it:
 9. Data preparation flags, never drops: descriptions over 512 characters are collapsed and capped with a warning, and years outside 2000-2100 are treated as invalid timestamps with a warning. No company is dropped for being an outlier.
 10. A message with no usable `updatedAt` gets the oldest possible time, so any dated event overrides it.
 11. When two events carry the same record, the stored `source` is the smaller one (`LEAST`), so it does not depend on arrival order.
-12. The data is synthetic (`SYN-` numbers). Tests use a separate database, `companies_test`.
+12. The data is synthetic (`SYN-` numbers). Tests use a separate database, `companies_test` (and their own RabbitMQ queues, never `company-events`).
+13. Free text is cleaned but never rejected for its content: lone surrogates become U+FFFD, and only the first 20,000 characters of a field are examined (the feed's longest is 3,359).
 
 ## 5. Results (pasted from real runs)
 Machine: AMD Ryzen 7 170 (16 threads), 7.6 GB RAM visible to WSL2 (Linux 6.18), Postgres 16 + pgvector 0.8 and RabbitMQ in Docker
@@ -97,45 +100,53 @@ That is the long-lived dev database, which has had several publishes, hence `see
 following the README once (publish once, consumer drained), gives the same output with `seen_count sum 21` and exit 0.
 The "expected" side is a separate plain-Python fold of the feed (not the production SQL), so the two can disagree.
 
-**Tests and checks:** `uv run ruff check .` clean, `ruff format --check` clean (54 files), `uv run pytest -q`: **638 passed**
-in 175.8 s. They include seeded randomised event histories checked against the same independent fold, shuffle and replay
-proofs, a threaded concurrency test, fuzzing of the parser, and API matrices (roles, filters, errors, outage).
+**Tests and checks:** `uv run ruff check .` clean, `ruff format --check` clean (56 files), `uv run pytest -q`: **652 passed**
+in 187.6 s, none skipped. They include seeded randomised event histories checked against the same independent fold, shuffle
+and replay proofs, a threaded concurrency test, fuzzing of the parser, API matrices (roles, filters, errors, outage), and
+consumer tests against a real RabbitMQ (ack order, crash leaves the queue intact). Unit tests alone (`pytest tests/unit`) pass
+with Postgres and RabbitMQ unreachable (354 passed). In CI a missing service fails the run instead of skipping.
 
-**Mutation checks** (each: break the code on purpose, see red, restore, see green; run during development in this project):
-- Remove the per-company advisory lock: the concurrency tests fail in 3 of 3 runs.
-- Make reconcile ignore wrong values: 2 tests fail. Make it ignore undercounted rejects: a test fails.
-- Make the English `homestay` pattern greedy again (deep-dive labels): the language-label test fails.
-- The randomised oracle found two real defects, both fixed: `source` depended on arrival order, and an industry filter value with
-  surrounding whitespace was not stripped before matching. A full-feed test caught a pgvector `Vector` double-wrap that silently turned
-  embeddable messages into `processing_error` rejects.
+**Mutation checks** (break the code on purpose, see red, restore, see green; all run in this session on the final code):
+- Remove the per-company advisory lock (`mle/repository.py`): the concurrency tests fail in 3 of 3 runs (4, 4 and 3 of 4 tests fail); all 4 pass restored.
+- Ack before the write (`mle/consumer.py`): both new broker tests fail. Swallow the write error and ack anyway: the crash test fails.
+- Drop the `embedding_model` filter from the similarity query: `test_vectors_from_another_model_are_never_compared` fails.
+- Make reconcile ignore wrong values: 2 tests fail. Make it ignore undercounted rejects: 1 test fails. All 12 pass restored.
+- New tests written before their fix and seen failing first: lone surrogates in six fields (6 failed), the quadratic repeat regex (8 s on
+  20,000 characters), an unencodable text in the isolated retry path, and a model failure that must be retried.
+- Earlier, the randomised oracle found two real defects, both fixed: `source` depended on arrival order, and an industry filter value
+  with surrounding whitespace was not stripped before matching (`test_industry_filter_ignores_case_and_padding`).
 
 **Latency** (`uv run python -m scripts.bench`, API on :8000, 1,000 random `GET /v1/companies/{reg}/similar?limit=10`, after 50 warm-up):
 
 | client threads | p50 ms | p95 ms | p99 ms | max ms | req/s | errors |
 |---|---|---|---|---|---|---|
-| 1 | 3.8 | 5.7 | 6.6 | 9.2 | 249 | 0 |
-| 8 | 31.7 | 40.3 | 47.2 | 58.7 | 249 | 0 |
+| 1 | 3.8 | 5.7 | 6.8 | 8.9 | 247 | 0 |
+| 8 | 31.3 | 38.8 | 42.5 | 52.5 | 254 | 0 |
 
-The target was p95 < 100 ms; both rows meet it. Throughput does not grow with eight threads (249 req/s in both): one
+(Measured after the last query change, the same-model filter. Before it the numbers were within 2 ms: p95 5.7 and 40.3 ms.)
+The target was p95 < 100 ms; both rows meet it. Throughput does not grow with eight threads (about 250 req/s in both): one
 uvicorn process is the limit, so 8 clients just queue (about 8 x the single-client latency).
 
 **EXPLAIN** (same script, `EXPLAIN (ANALYZE, BUFFERS)` of the exact query, vector literal removed):
 ```
-Limit  (actual time=1.030..1.031 rows=10)
+Limit  (actual time=0.709..0.710 rows=10)
   ->  Incremental Sort  Sort Key: distance, (state = 'Melaka') DESC, registration_number
-        ->  Limit  (actual time=0.760..0.930 rows=38)
+        ->  Limit  (actual time=0.489..0.646 rows=38)
               ->  Index Scan using companies_embedding_hnsw on companies
                     Order By: (embedding <=> '[...]'::vector)
                     Filter: (embedding IS NOT NULL) AND (registration_number <> 'SYN-000404')
-Planning Time: 0.106 ms   Execution Time: 1.999 ms
+                            AND (embedding_model = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+Planning Time: 0.104 ms   Execution Time: 0.767 ms
 ```
-The index is used. Of the 3.8 ms client p50 (single client), about 2 ms is this query's execution time; I did not break the remainder down (HTTP, company lookup, JSON).
+The index is used. Of the 3.8 ms client p50 (single client), under 1 ms is this query's execution time (different companies, so only roughly comparable); I did not break the remainder down (HTTP, company lookup, JSON).
 
-**Index accuracy:** for all 1,996 companies, the indexed top-10 equals the exact brute-force top-10 (`enable_indexscan = off`, no
-pool limit), both as a set and in order (a one-off script, not kept in the repo).
+**Index accuracy** (`uv run python -m scripts.check_recall`, with the model filter): for all 1,996 companies, the indexed top-10
+equals the exact brute-force top-10 (`enable_indexscan = off`, no pool limit), both as a set and in order:
+`1996 companies: identical top-10 set 1996, identical order 1996`.
 
-**Image:** 1.89 GB before, 1.1 GB after removing the uv cache from the layers and the duplicated `chown` layer. The model is
-241 MB and the virtualenv 276 MB; I did not shrink those. Container health: `healthy`, `/healthz` and `/readyz` 200.
+**Image:** 1.89 GB before, 1.1 GB after removing the uv cache from the layers and the duplicated `chown` layer (`uv` is now pinned to 0.13.9).
+The model is 241 MB and the virtualenv 276 MB; I did not shrink those. API container: `healthy`, `/healthz` and `/readyz` 200. The same image
+used as the consumer reported `unhealthy` (the health check probes the API's port), so the README runs it with `--no-healthcheck`; verified: no health state, and it consumes.
 
 **Surprises:**
 - The index scan returned 38 rows although the pool is 100, yet matched exact search for every company, so the early stop did not change any answer here.
@@ -182,24 +193,27 @@ Reasoning from the measurements above; I did not run a 10x test.
 - **Event log.** 2,434 events for 2,000 companies today (about 1.2 each). Growth is linear in the number of real changes. The projection only reads the events of the companies in the batch. Later: partition or archive old versions.
 - **Reads.** One uvicorn process serves about 249 req/s here, and eight clients just queue. Scale with several workers or replicas behind a pooler (not measured). An HNSW index over ~20,000 rows is still a small index.
 - **A real limit I can see.** If the same text mix scaled 10x, the largest group of identical descriptions would be about 590 companies. That is more than `hnsw.ef_search = 200`, so the same-state tie-break would only see part of the group. Fix: rank one vector per distinct text and expand to companies, or raise `ef_search` and the pool.
-- **Backfills and model changes.** The model name is stored per row, so a re-embed job can find stale rows. The job is not built (section 8).
+- **Backfills and model changes.** The model name is stored per row, so a re-embed job can find stale rows. The job is not built (section 8). Because similarity only compares rows of the same model, a model swap is safe but incomplete until every company is re-embedded: a company on the new model sees only the companies already on it.
 - **Monitoring.** Queue depth and consumer lag, reject rate and `seen_count`, batch time, API p95 and 5xx rate, count of companies without embeddings.
 
 ## 8. What's left
 - Observability: metrics, tracing and alerts (only log lines exist now).
-- Re-embed job for a model change (the schema supports it; nothing runs it).
+- Re-embed job for a model change (the schema supports it; nothing runs it). Until it exists, a swap leaves companies on the old model without neighbours on the new one.
 - Optional GPU extra for a larger model: not set up and untested; `scripts/eval_embeddings.py --cuda` is untested.
 - Authentication and rate limiting; `X-Role` is a visibility stub.
 - Diversified ranking (many near-identical companies currently fill the top 10).
 - Load and chaos tests: no 10x run, no broker or database kill during a long run; consumer shutdown during a real database outage is only unit tested.
 - Fixing the tie-group limit in section 7.
-- Test suite speed (about 3 minutes); image size (1.1 GB, mostly the model and the virtualenv); `uv:latest` is not pinned in the Dockerfile.
+- Test suite speed (about 3 minutes); image size (1.1 GB, mostly the model and the virtualenv).
+- Embedding runs while the per-company advisory locks are held (`process_batch`), so a slow model lengthens lock time for other consumers touching the same company. Moving it outside the lock needs the projected text, so it is not a small change; not done.
+- `RETURNING (xmax = 0)` (`_INSERT_EVENT`) tells a new row from a conflict using a Postgres internal. It only feeds a statistic, so I left it.
+- No test restarts the broker mid-run, and the consumer is only unit tested through a database outage.
 - `AGENTS.md` and some `docs/` still name `bge-small` as the default; the code default is the multilingual model (section 6).
 - Quality evidence is on 172 short template-like texts with business-type labels I wrote; no human relevance judgement.
 
 ## 9. AI tools used
 - **Tools.** Claude Code (model Sonnet 5.5) in this repo, working prompt by prompt from `prompts/00` to `12`, with the `ponytail` and `superpowers` plugins and some skills from the `mattpocock` collection that I had it install (for a question-and-answer session to check my understanding). The `AGENTS.md` rules (honesty, small steps, ask before decisions) applied to it throughout.
-- **What the assistant did.** Planning each step, writing the code in `mle/`, `scripts/` and `tests/`, the `Dockerfile` and CI workflow, running profiles, evals, benchmarks and the test suite, debugging, two review passes, and drafting this file and the README from those runs.
+- **What the assistant did.** Planning each step, writing the code in `mle/`, `scripts/` and `tests/`, the `Dockerfile` and CI workflow, running profiles, evals, benchmarks and the test suite, debugging, two review passes, a final adversarial review (prompt 12) whose findings it then fixed at my request, and drafting this file and the README from those runs.
 - **What I did.** I made the design decisions listed in `AGENTS.md` (embedding model, struck-off meaning, null handling, timezone, deep-dive topic). I set up the prompts, docs and `AGENTS.md` for the assistant (the template files come from the assessment). I did not write the modules in `mle/`, `scripts/` or `tests/` from scratch; I made some small hand edits and fixes that I did not track individually.
 - **What I reviewed.** I read the code and can explain every file. My changes mostly went through the assistant as requests rather than hand edits.
 - **Data.** The feed is synthetic. The assistant, like any session in Claude Code, saw feed excerpts and outputs while working. The embedding model runs locally on CPU, and no paid embedding or LLM API is used by the product.

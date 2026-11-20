@@ -2,11 +2,12 @@
 
 import json
 import random
+import time
 from datetime import UTC, datetime
 
 import pytest
 
-from mle.normalize import DESCRIPTION_CAP, EPOCH, MALAYSIA, Event, Rejected, parse_message
+from mle.normalize import DESCRIPTION_CAP, EPOCH, MALAYSIA, Event, Rejected, clean_text, parse_message
 
 BASE = {
     "type": "company-upserted", "registrationNumber": "SYN-000101", "updatedAt": "2026-08-14T09:00:00+08:00",
@@ -150,3 +151,33 @@ def test_runaway_descriptions_are_capped_collapsed_and_flagged_or_short(text):
         None, json.dumps({**BASE, "data": {**BASE["data"], "natureOfBusiness": text}}).encode()
     )
     assert isinstance(event, Event) and 0 < len(event.nature_of_business) <= DESCRIPTION_CAP
+
+
+# ---- lone surrogates: valid JSON (`"\ud800"`) but not encodable as UTF-8, so Postgres and sha256 cannot take them ---
+
+
+@pytest.mark.parametrize(
+    "where", ["registrationNumber", "source", "companyName", "natureOfBusiness", "state", "industry"]
+)
+def test_lone_surrogates_are_survived_and_can_always_be_encoded(where):
+    payload = json.loads(json.dumps(BASE))
+    target = payload["data"] if where in payload["data"] else payload
+    target[where] = "SYN-ab\ud800cd"
+    result = parse_message(
+        None, json.dumps(payload).encode()
+    )  # json.dumps writes the lone surrogate as \ud800
+    check_invariants(result)
+    if isinstance(result, Event):
+        for text in (result.registration_number, result.company_name, result.nature_of_business, result.state,
+                     result.industry, result.source):  # fmt: skip
+            assert text is None or text.encode("utf-8")  # raises UnicodeEncodeError on a surrogate
+
+
+@pytest.mark.parametrize("length", [20_000, 1_000_000])
+def test_clean_text_stays_fast_on_long_text_that_does_not_repeat(length):
+    """The repeated-phrase regex was quadratic: 20,000 characters took ~8 s and stalled the consumer's event loop."""
+    rng = random.Random(0)
+    text = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz ") for _ in range(length))
+    started = time.perf_counter()
+    clean_text(text)
+    assert time.perf_counter() - started < 1.0
