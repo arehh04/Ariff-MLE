@@ -273,7 +273,7 @@ FROM companies WHERE registration_number = %s
 # The query vector arrives as a PARAMETER (fetched first by get_company), so the planner sees a constant and can use
 # the HNSW index. Extra ORDER BY keys would stop it using the index, so the inner query orders by distance ONLY and
 # takes the `pool` nearest rows; the outer query then breaks ties (the feed has many identical descriptions):
-# same state first, then registration number. Safe while `pool` exceeds the biggest tie group (~43 in the feed).
+# same state first, then registration number. Safe while `pool` exceeds the biggest tie group (59 companies share one description in the feed).
 _SIMILAR = """
 SELECT registration_number, company_name, nature_of_business, state, industry, status, source_updated_at,
        updated_at_missing, 1 - distance AS score
