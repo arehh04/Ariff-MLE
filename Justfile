@@ -25,3 +25,7 @@ consume:
 # Run the API on http://localhost:8000
 serve:
     uv run uvicorn mle.api:create_app --factory --port 8000
+
+# Diff the database against an independent fold of the feed (exit 1 on mismatch). Run after `just publish`.
+reconcile:
+    uv run python -m scripts.reconcile

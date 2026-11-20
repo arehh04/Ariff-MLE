@@ -1,53 +1,18 @@
-"""An independent reference implementation of the projection, in plain Python (no SQL).
-
-If the SQL in repository.py and this fold ever disagree, one of them is wrong; the tests use it as the oracle.
-Rules (AGENTS.md "Decisions made"): newest non-null value per field wins, ordered by (source_updated_at, version_hash);
-status comes from the newest event that strikes off or carries data; duplicates (same version_hash) collapse.
-"""
+"""Test helpers around the independent oracle: `fold` lives in scripts/reconcile.py (plain Python, no SQL), so the tests
+and the reconcile script share ONE reference implementation of the projection."""
 
 import json
 import random
-from collections import defaultdict
-from dataclasses import replace
 
-from mle.normalize import Event, Rejected, embedding_source, parse_message
+from mle.normalize import Event, Rejected, parse_message
+from scripts.reconcile import fold
 
-FIELDS = ("company_name", "nature_of_business", "state", "industry", "source")
 SNAPSHOT_SQL = """
 SELECT registration_number, company_name, nature_of_business, state, industry, source, status, source_updated_at,
        updated_at_missing, embedding_text, embedding_status, embedding_model, md5(embedding::text)
 FROM companies ORDER BY registration_number
 """
 RESET_SQL = "TRUNCATE company_events, companies, rejected_events RESTART IDENTITY"
-
-
-def fold(events: list[Event], model: str) -> dict[str, tuple]:
-    """Expected `companies` rows (same column order as SNAPSHOT_SQL minus the vector md5)."""
-    by_reg: dict[str, dict[str, Event]] = defaultdict(dict)
-    for e in events:
-        kept = by_reg[e.registration_number].get(e.version_hash)
-        if kept is not None:  # same content delivered twice: the log keeps the smallest non-null `source`
-            sources = [s for s in (kept.source, e.source) if s is not None]
-            e = replace(kept, source=min(sources) if sources else None)
-        by_reg[e.registration_number][e.version_hash] = e
-    expected = {}
-    for reg, unique in by_reg.items():
-        ordered = sorted(unique.values(), key=lambda e: (e.source_updated_at, e.version_hash), reverse=True)
-
-        def newest(attr: str, ordered=ordered):
-            return next((getattr(e, attr) for e in ordered if getattr(e, attr) is not None), None)
-
-        deciding = [e for e in ordered if e.kind == "struck_off" or e.has_data]
-        status = "struck_off" if deciding and deciding[0].kind == "struck_off" else "active"
-        text, text_status = embedding_source(
-            newest("nature_of_business"), newest("industry"), newest("company_name")
-        )
-        expected[reg] = (
-            reg, *(newest(f) for f in FIELDS), status,
-            max(e.source_updated_at for e in ordered), all(e.updated_at_missing for e in ordered),
-            text, text_status if text else "missing", model if text else None,
-        )  # fmt: skip
-    return expected
 
 
 def snapshot(conn) -> dict[str, tuple]:
