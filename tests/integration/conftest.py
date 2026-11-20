@@ -20,6 +20,7 @@ class CountingEmbedder:
 
     def __init__(self, name: str = "fake-1", fail_on: str | None = None) -> None:
         self.name = name
+        self.dim = 384
         self.fail_on = fail_on
         self.texts: list[str] = []
 

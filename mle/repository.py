@@ -15,21 +15,13 @@ import json
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from typing import Protocol, Self
+from typing import Self
 
 import psycopg
 from pgvector import Vector
 
+from mle.embedding import Embedder
 from mle.normalize import Event, Rejected, embedding_source
-
-
-class Embedder(Protocol):
-    """Minimal interface the write path needs. `embed` must raise ValueError for a text it cannot handle;
-    any other exception (model missing, process down) is treated as infrastructure and is retried, not rejected."""
-
-    name: str
-
-    def embed(self, texts: list[str]) -> Sequence[Sequence[float]]: ...
 
 
 @dataclass

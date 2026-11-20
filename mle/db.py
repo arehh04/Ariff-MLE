@@ -1,18 +1,18 @@
 """Database connection and migrations. Config comes from the environment, defaulting to the compose values."""
 
-import os
 from pathlib import Path
 
 import psycopg
 from pgvector.psycopg import register_vector
 
-DEFAULT_DSN = "postgresql://postgres:postgres@localhost:5432/companies"
+from mle.config import get_settings
+
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 _MIGRATION_LOCK = 7_243_001  # arbitrary constant: every process that migrates must use the same key
 
 
 def dsn() -> str:
-    return os.environ.get("DATABASE_URL", DEFAULT_DSN)
+    return get_settings().database_url
 
 
 def migrate(conninfo: str | None = None) -> list[str]:
