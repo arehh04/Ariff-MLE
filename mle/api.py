@@ -135,7 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         results: list[dict] = []
         if company["embedding"] is not None:
             with request.app.state.pool.connection() as conn:
-                results = repository.similar(conn, company, limit, normalize_state(state), industry or None,
+                results = repository.similar(conn, company, limit, normalize_state(state), (industry or "").strip() or None,
                                              include_struck_off=role == "analyst")  # fmt: skip
         return {
             "company": _card(company),

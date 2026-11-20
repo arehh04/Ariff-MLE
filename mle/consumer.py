@@ -24,6 +24,11 @@ from producer.publish import QUEUE
 
 log = logging.getLogger("consumer")
 _MAX_BACKOFF = 30.0
+_FIRST_BACKOFF = 1.0
+
+
+class Stopping(Exception):
+    """Shutdown was requested while the database was down. Nothing was acked; the broker redelivers."""
 
 
 async def _gather(inbox: asyncio.Queue, settings: Settings, first: Any) -> list:
@@ -43,10 +48,10 @@ async def _gather(inbox: asyncio.Queue, settings: Settings, first: Any) -> list:
 
 
 async def _write_with_retry(
-    conn: psycopg.Connection | None, settings: Settings, embedder: Embedder, parsed: list
+    conn: psycopg.Connection | None, settings: Settings, embedder: Embedder, parsed: list, stop: asyncio.Event
 ) -> tuple[psycopg.Connection, BatchResult]:
     """Retry the same batch until the database accepts it. Only infrastructure errors loop; nothing is acked here."""
-    delay = 1.0
+    delay = _FIRST_BACKOFF
     while True:
         try:
             if conn is None or conn.closed:
@@ -57,8 +62,12 @@ async def _write_with_retry(
             if conn is not None:
                 await asyncio.to_thread(conn.close)
             conn = None
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, _MAX_BACKOFF)
+            try:
+                await asyncio.wait_for(stop.wait(), delay)  # a sleep that Ctrl-C can interrupt
+            except TimeoutError:
+                delay = min(delay * 2, _MAX_BACKOFF)
+            else:
+                raise Stopping from exc
 
 
 async def run(settings: Settings, embedder: Embedder, stop: asyncio.Event) -> BatchResult:
@@ -84,7 +93,10 @@ async def run(settings: Settings, embedder: Embedder, stop: asyncio.Event) -> Ba
                 continue
             messages = await _gather(inbox, settings, first)
             parsed = [parse_message(m.message_id, m.body) for m in messages]
-            conn, result = await _write_with_retry(conn, settings, embedder, parsed)
+            try:
+                conn, result = await _write_with_retry(conn, settings, embedder, parsed, stop)
+            except Stopping:
+                break  # unacked: these messages go back to the queue
             try:
                 for m in messages:  # ack only now, after the transaction committed
                     await m.ack()

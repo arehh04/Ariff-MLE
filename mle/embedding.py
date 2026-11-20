@@ -1,6 +1,6 @@
 """Embedders: turn text into 384-d unit vectors. The schema fixes `vector(384)`.
 
-`embed` raises ValueError for a text it cannot handle (the write path rejects that one message); any other
+`embed` raises UnembeddableText for a text it cannot handle (the write path rejects that one message); any other
 exception means infrastructure trouble (model missing, process down) and the batch is retried, not rejected.
 """
 
@@ -14,6 +14,12 @@ from typing import Protocol
 from mle.config import Settings
 
 DIM = 384
+
+
+class UnembeddableText(ValueError):
+    """Raised by an embedder for one text it cannot handle. Plain ValueError is NOT caught: it means a bug."""
+
+
 _WORDS = re.compile(r"\w+")
 
 

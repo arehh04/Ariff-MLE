@@ -9,6 +9,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from mle import db
+from mle.embedding import UnembeddableText
 from mle.normalize import Event, parse_message
 
 TEST_DSN = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/companies_test")
@@ -28,7 +29,7 @@ class CountingEmbedder:
         out = []
         for text in texts:
             if text == self.fail_on:
-                raise ValueError(f"cannot embed {text!r}")
+                raise UnembeddableText(f"cannot embed {text!r}")
             self.texts.append(text)
             digest = hashlib.sha256(text.encode()).digest()
             out.append([digest[i % len(digest)] / 255 for i in range(384)])

@@ -20,7 +20,7 @@ from typing import Self
 import psycopg
 from pgvector import Vector
 
-from mle.embedding import Embedder
+from mle.embedding import Embedder, UnembeddableText
 from mle.normalize import Event, Rejected, embedding_source
 
 
@@ -50,8 +50,14 @@ _INSERT_EVENT = """
 INSERT INTO company_events (registration_number, version_hash, message_id, kind, source_updated_at,
     updated_at_missing, has_data, company_name, nature_of_business, state, industry, source, warnings)
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (registration_number, version_hash) DO NOTHING
+ON CONFLICT (registration_number, version_hash) DO UPDATE
+SET source = LEAST(company_events.source, EXCLUDED.source)
+WHERE company_events.source IS DISTINCT FROM LEAST(company_events.source, EXCLUDED.source)
+RETURNING (xmax = 0)
 """
+# `source` is not part of version_hash, so redeliveries of the same content may disagree on it. "First delivery wins"
+# would make companies.source depend on arrival order; keeping the smallest non-null value does not (LEAST ignores
+# NULL). The WHERE clause makes an unchanged duplicate write nothing. RETURNING (xmax = 0) is true only for a real insert.
 
 # Fold the event log into one row per company. Every field: the value of the NEWEST event that has one.
 # "Newest" = source_updated_at DESC, then version_hash DESC as a fixed tie-break, so equal timestamps resolve
@@ -135,7 +141,8 @@ def _insert_events(conn: psycopg.Connection, events: list[Event]) -> tuple[int, 
              e.updated_at_missing, e.has_data, e.company_name, e.nature_of_business, e.state, e.industry,
              e.source, list(e.warnings)),
         )  # fmt: skip
-        new += cur.rowcount
+        row = cur.fetchone()  # None: a duplicate that changed nothing
+        new += bool(row and row[0])
     return new, len(events) - new
 
 
@@ -235,19 +242,19 @@ def process_batch_isolated(
 ) -> BatchResult:
     """Like `process_batch`, but one bad message cannot sink the batch.
 
-    Data-level errors (psycopg.DataError, or ValueError from the embedder) -> retry message by message and store the
+    Data-level errors (psycopg.DataError, or UnembeddableText from the embedder) -> retry message by message and store the
     offender in `rejected_events` as `processing_error`. Anything else (OperationalError, a dead connection, ...)
     propagates untouched so the consumer does not ack and retries with back-off.
     """
     try:
         return process_batch(conn, embedder, messages)
-    except psycopg.DataError, ValueError:
+    except psycopg.DataError, UnembeddableText:
         pass  # the failed transaction was rolled back; fall through to one-by-one
     total = BatchResult()
     for message in messages:
         try:
             total += process_batch(conn, embedder, [message])
-        except (psycopg.DataError, ValueError) as exc:
+        except (psycopg.DataError, UnembeddableText) as exc:
             if isinstance(message, Rejected):
                 raise
             raw = json.dumps({"error": f"{type(exc).__name__}: {exc}", "event": asdict(message)}, default=str)

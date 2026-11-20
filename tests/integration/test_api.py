@@ -1,6 +1,7 @@
 """API tests: FastAPI TestClient on a seeded companies_test database (test plan, API section)."""
 
 import math
+from urllib.parse import quote
 
 import psycopg
 import pytest
@@ -11,7 +12,7 @@ from mle import repository
 from mle.api import create_app
 from mle.config import Settings
 from mle.repository import process_batch
-from tests.integration.conftest import make_event
+from tests.integration.conftest import CountingEmbedder, make_event
 
 TS = "2026-08-14T09:00:00+08:00"
 # text -> angle in degrees: vectors on a circle, so cosine similarity is cos(angle difference) and orders are known.
@@ -207,3 +208,155 @@ def test_unexpected_error_is_500_problem_without_internals(client, monkeypatch):
     assert r.status_code == 500 and r.headers["content-type"].startswith("application/problem+json")
     assert r.json()["type"].endswith("/internal-error")
     assert "secret internal detail" not in r.text and "Traceback" not in r.text
+
+
+# ---- matrices: the same property over many inputs --------------------------------------------------------------
+
+EMBEDDED = ["SYN-000101", "SYN-000102", "SYN-000103", "SYN-000104", "SYN-000105", "SYN-000106", "SYN-000107"]
+PORTAL_FROM_101 = ["SYN-000105", "SYN-000107", "SYN-000106", "SYN-000102", "SYN-000103", "SYN-000104"]
+
+
+@pytest.mark.parametrize("role", ["portal", "analyst"])
+@pytest.mark.parametrize("reg", EMBEDDED)
+def test_self_never_appears_and_scores_never_increase(client, reg, role):
+    r = similar(client, reg=reg, role=role)
+    assert r.status_code == 200
+    assert reg not in regs(r)
+    scores = [x["score"] for x in r.json()["results"]]
+    assert scores == sorted(scores, reverse=True) and all(-1.0001 <= s <= 1.0001 for s in scores)
+    assert len(regs(r)) == len(set(regs(r)))  # no duplicates
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 4, 5, 6, 7, 10, 25, 50])
+def test_limit_truncates_the_same_ranking(client, limit):
+    r = similar(client, limit=limit)
+    assert regs(r) == PORTAL_FROM_101[:limit]
+    assert r.json()["meta"]["limit"] == limit and r.json()["meta"]["returned"] == min(limit, 6)
+
+
+@pytest.mark.parametrize(
+    "variant", ["syn-000101", " SYN-000101", "SYN-000101 ", "Syn-000101", "%09SYN-000101%0A"]
+)
+def test_registration_number_spelling_does_not_change_the_answer(client, variant):
+    r = client.get(f"/v1/companies/{variant}/similar")
+    assert r.status_code == 200 and regs(r) == PORTAL_FROM_101
+
+
+@pytest.mark.parametrize("state", ["perak", "PERAK", " Perak ", "pErAk", "Perak"])
+def test_state_filter_is_normalised(client, state):
+    assert set(regs(similar(client, state=state))) == {"SYN-000105", "SYN-000107", "SYN-000102"}
+
+
+@pytest.mark.parametrize("industry", ["retail", "RETAIL", " Retail ", "Retail"])
+def test_industry_filter_ignores_case_and_padding(client, industry):
+    assert set(regs(similar(client, industry=industry))) == {"SYN-000103", "SYN-000104"}
+
+
+def test_filters_combine(client):
+    assert regs(similar(client, state="Selangor", industry="Healthcare")) == ["SYN-000106"]
+    assert regs(similar(client, state="Johor", industry="Healthcare")) == []
+
+
+@pytest.mark.parametrize(
+    "params", [{"state": "Atlantis"}, {"industry": "Piracy"}, {"state": "Perak", "industry": "Retail"}]
+)
+def test_filter_with_no_match_is_200_with_empty_results_and_no_reason(client, params):
+    r = similar(client, **params)
+    assert r.status_code == 200 and r.json()["results"] == [] and r.json()["meta"]["reason"] is None
+
+
+@pytest.mark.parametrize("params", [{"state": "   "}, {"industry": ""}, {"state": "", "industry": ""}])
+def test_blank_filters_are_ignored(client, params):
+    assert regs(similar(client, **params)) == PORTAL_FROM_101
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "51", "1.5", "abc", "", "99999999999"])
+def test_invalid_limits_are_422_problem_json(client, limit):
+    r = client.get("/v1/companies/SYN-000101/similar", params={"limit": limit})
+    assert r.status_code == 422 and r.headers["content-type"].startswith("application/problem+json")
+    assert any(e["field"] == "limit" for e in r.json()["errors"])
+
+
+@pytest.mark.parametrize("role", ["Portal", "ANALYST", "admin", "portal,analyst", "root"])
+@pytest.mark.parametrize("path", ["/v1/companies/SYN-000101", "/v1/companies/SYN-000101/similar"])
+def test_unknown_roles_are_422_on_both_endpoints(client, path, role):
+    r = client.get(path, headers={"X-Role": role})
+    assert r.status_code == 422 and r.json()["errors"][0]["field"] == "X-Role"
+
+
+@pytest.mark.parametrize("method", ["post", "put", "delete", "patch"])
+def test_other_methods_are_405_problem_json(client, method):
+    r = getattr(client, method)("/v1/companies/SYN-000101/similar")
+    assert r.status_code == 405 and r.headers["content-type"].startswith("application/problem+json")
+
+
+@pytest.mark.parametrize(
+    "path", ["/v1", "/v1/companies", "/v1/companies/SYN-000101/other", "/healthz/x", "/"]
+)
+def test_unknown_paths_are_404_problem_json(client, path):
+    r = client.get(path)
+    assert r.status_code == 404 and r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["status"] == 404 and r.json()["instance"] == path
+
+
+@pytest.mark.parametrize("reg", ["SYN-000101", "SYN-000109", "SYN-000108"])
+def test_detail_fields_are_complete(client, reg):
+    r = client.get(f"/v1/companies/{reg}", headers={"X-Role": "analyst"})
+    assert set(r.json()) == {
+        "registrationNumber", "companyName", "natureOfBusiness", "state", "industry", "status", "updatedAt",
+        "source", "embeddingStatus",
+    }  # fmt: skip
+
+
+def test_the_detail_and_similar_company_cards_agree(client):
+    detail = client.get("/v1/companies/SYN-000101").json()
+    card = similar(client).json()["company"]
+    assert {k: detail[k] for k in card} == card
+
+
+def test_responses_carry_no_internal_columns(client):
+    body = similar(client).text
+    assert "embedding" not in body.replace("embeddingStatus", "") and "version_hash" not in body
+
+
+def test_results_are_stable_across_repeated_calls(client):
+    first = similar(client).json()
+    assert all(similar(client).json() == first for _ in range(5))
+
+
+def test_analyst_sees_the_struck_off_company_ranked_by_similarity_not_last(client):
+    ranked = regs(similar(client, role="analyst"))
+    assert ranked.index("SYN-000108") < ranked.index("SYN-000102")  # 5 degrees away beats 10 degrees away
+
+
+# ---- hostile text is data: stored verbatim, never executed, never able to change a query -----------------------
+
+HOSTILE = ["'; DROP TABLE companies; --", "Robert'); DELETE FROM company_events;--", "\" OR 1=1 --", "$(rm -rf /)",
+           "{{7*7}} %s %(x)s", "' UNION SELECT registration_number FROM companies --"]  # fmt: skip
+
+
+@pytest.mark.parametrize("text", HOSTILE)
+def test_hostile_text_is_stored_verbatim_and_cannot_inject_through_filters(client, conn, text):
+    process_batch(
+        conn,
+        CountingEmbedder(),
+        [make_event("SYN-000200", TS, companyName=text, natureOfBusiness=text, industry=text)],
+    )
+    stored = conn.execute(
+        "SELECT company_name, nature_of_business, industry FROM companies WHERE registration_number = 'SYN-000200'"
+    ).fetchone()
+    assert stored == (text, text, text)  # stored as plain text
+    events_before = conn.execute("SELECT count(*) FROM company_events").fetchone()[0]
+
+    assert client.get("/v1/companies/SYN-000200").json()["companyName"] == text
+    assert regs(similar(client, state=text)) == []  # no company has this state
+    assert regs(similar(client, industry=text)) == [
+        "SYN-000200"
+    ]  # compared as plain text: only the row that has it
+    r = client.get(
+        "/v1/companies/" + quote(text, safe="") + "/similar"
+    )  # hostile text as the registration number
+    assert r.status_code == 404 and r.headers["content-type"].startswith("application/problem+json")
+
+    assert conn.execute("SELECT count(*) FROM companies").fetchone()[0] == 10  # nothing dropped or deleted
+    assert conn.execute("SELECT count(*) FROM company_events").fetchone()[0] == events_before
