@@ -7,3 +7,5 @@ __pycache__/
 .pyrefly/
 .env
 .DS_Store
+.env.*
+.claude/settings.local.json
