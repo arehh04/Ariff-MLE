@@ -8,12 +8,13 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pgvector.psycopg import register_vector
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, ConfigDict
@@ -148,6 +149,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def detail(request: Request, registration_number: Registration, role: RoleHeader = "portal") -> dict:
         company = _load_visible(request, registration_number, role)
         return _card(company) | {"source": company["source"], "embedding_status": company["embedding_status"]}
+
+    @app.get("/", include_in_schema=False)
+    def demo_page() -> FileResponse:  # shortcut: static demo UI, no auth; it only calls the endpoints above
+        return FileResponse(FilePath(__file__).parent / "static" / "index.html")
 
     @app.get("/healthz")
     def healthz() -> dict:

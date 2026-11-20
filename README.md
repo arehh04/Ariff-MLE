@@ -42,6 +42,8 @@ curl -s localhost:8000/v1/companies/SYN-000101        # card header: fields plus
 curl -si localhost:8000/v1/companies/NOPE/similar     # 404 application/problem+json (RFC 7807)
 curl -s localhost:8000/healthz; curl -s localhost:8000/readyz
 ```
+With the service running, open http://localhost:8000/ for a small demo page that calls these endpoints (type a registration
+number, pick a role, filters and limit). It is a single static file, `mle/static/index.html`; there is no company search because the API has no list endpoint.
 The full contract is in [docs/04-api.md](docs/04-api.md). The API and the consumer both apply the SQL migrations in
 `migrations/` on start (idempotent), so there is no separate migration step.
 
@@ -97,7 +99,7 @@ The defaults are the docker-compose credentials (synthetic data, no secrets). Ra
 
 ## Layout
 ```
-mle/             consumer.py (queue -> Postgres), api.py (FastAPI), repository.py (ALL SQL), normalize.py (pure parsing),
+mle/             static/index.html (demo page), consumer.py (queue -> Postgres), api.py (FastAPI), repository.py (ALL SQL), normalize.py (pure parsing),
                  embedding.py (embedders), db.py (connect + migrations), config.py (settings)
 migrations/      001_init.sql: event log, companies projection, reject table, HNSW index
 scripts/         reconcile, bench, eval_quality, eval_embeddings, profile_feed

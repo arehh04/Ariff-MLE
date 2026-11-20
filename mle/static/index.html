@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Similar Companies</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--fg:#1c2430;--mute:#667085;--line:#e1e5eb;--accent:#0b6e6e;--soft:#d9efee;--bad:#b42318;--badsoft:#fde8e6}
+@media(prefers-color-scheme:dark){:root{--bg:#10151c;--panel:#18202a;--fg:#e6ebf2;--mute:#97a3b4;--line:#2a3441;--accent:#4fc3c0;--soft:#14393a;--bad:#ff8b80;--badsoft:#3b1d1a;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif;padding:20px 16px}
+.wrap{max-width:900px;margin:0 auto;display:grid;gap:14px}h1{font-size:20px;margin:0}h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:0 0 8px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;min-width:0}
+input,select,button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;min-width:0}
+button{cursor:pointer}button.go{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.row>*{flex:1 1 130px}
+.mono{font-family:ui-monospace,monospace;font-size:12px}.mute{color:var(--mute)}
+.pill{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;background:var(--soft);color:var(--accent);margin-right:4px}.pill.bad{background:var(--badsoft);color:var(--bad)}
+.res{display:grid;grid-template-columns:24px minmax(0,1fr) 90px;gap:10px;padding:10px 0;border-top:1px solid var(--line);align-items:center;cursor:pointer}
+.bar{height:6px;border-radius:3px;background:var(--line);margin-top:4px}.bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.err{background:var(--badsoft);color:var(--bad);padding:10px;border-radius:6px;overflow-wrap:anywhere}
+:focus-visible{outline:2px solid var(--accent)}
+</style></head><body><div class="wrap">
+<h1>Similar Companies</h1>
+<form class="panel" id="f">
+  <h2>Ask the service</h2>
+  <div class="row"><input id="reg" value="SYN-000101" aria-label="Registration number" required>
+  <button class="go" type="submit">Find similar</button></div>
+  <div class="row">
+    <select id="role" aria-label="Role"><option value="portal">role: portal</option><option value="analyst">role: analyst (sees struck-off)</option></select>
+    <select id="limit" aria-label="Limit"><option>5</option><option selected>10</option><option>20</option><option>50</option></select>
+    <input id="state" placeholder="state filter, e.g. Perak" aria-label="State filter">
+    <input id="industry" placeholder="industry filter, e.g. Healthcare" aria-label="Industry filter">
+  </div>
+  <div class="row mute" style="margin-top:10px">Try:
+    <a href="#SYN-000101">SYN-000101</a><a href="#SYN-000186">SYN-000186 (struck off)</a><a href="#SYN-000048">SYN-000048 (no description)</a><a href="#NOPE">NOPE (404)</a></div>
+</form>
+<div id="out" aria-live="polite"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+function pills(c){const d=el('div');d.style.margin='6px 0';for(const v of [c.state,c.industry])if(v)d.append(el('span','pill',v));if(c.status==='struck_off')d.append(el('span','pill bad','struck off'));return d}
+async function run(){
+  const reg=$('reg').value.trim(),q=new URLSearchParams({limit:$('limit').value});
+  if($('state').value.trim())q.set('state',$('state').value.trim());
+  if($('industry').value.trim())q.set('industry',$('industry').value.trim());
+  const t0=performance.now(),out=$('out');out.replaceChildren();
+  let r,body;
+  try{r=await fetch(`/v1/companies/${encodeURIComponent(reg)}/similar?${q}`,{headers:{'X-Role':$('role').value}});body=await r.json()}
+  catch(e){out.append(el('div','err','Could not reach the API: '+e.message));return}
+  const ms=Math.round(performance.now()-t0),p=el('div','panel');
+  p.append(el('div','mono mute',`GET /v1/companies/${reg}/similar → HTTP ${r.status} in ${ms} ms`));
+  if(!r.ok){p.append(el('div','err',`${body.title||'Error'}: ${body.detail||''}`));const raw=el('pre','mono',JSON.stringify(body,null,2));p.append(raw);out.append(p);return}
+  const c=body.company;p.append(el('h2',null,'Company'),el('div',null,c.companyName||'(no name)'),el('div','mono mute',c.registrationNumber),pills(c),el('div',null,c.natureOfBusiness||'No description in the feed.'));
+  p.append(el('div','mono mute',`model ${body.meta.model||'none'} · returned ${body.meta.returned} of ${body.meta.limit}`+(body.meta.reason?` · reason: ${body.meta.reason}`:'')));
+  out.append(p);
+  const rp=el('div','panel');rp.append(el('h2',null,'Most similar'));
+  if(!body.results.length)rp.append(el('div','mute','No results.'));
+  body.results.forEach((x,i)=>{const row=el('div','res');row.tabIndex=0;row.onclick=()=>{$('reg').value=x.registrationNumber;run()};
+    const mid=el('div');const n=el('div',null,x.companyName||'(no name)');n.append(' ',el('span','mono mute',x.registrationNumber));
+    mid.append(n,el('div','mute',x.natureOfBusiness||''),pills(x));
+    const sc=el('div');const s=el('div','mono',x.score.toFixed(4));s.style.textAlign='right';const bar=el('div','bar'),fill=el('i');fill.style.width=Math.max(0,x.score)*100+'%';bar.append(fill);sc.append(s,bar);
+    row.append(el('div','mono mute',i+1),mid,sc);rp.append(row)});
+  out.append(rp)}
+$('f').onsubmit=e=>{e.preventDefault();run()};
+addEventListener('hashchange',()=>{if(location.hash.length>1){$('reg').value=decodeURIComponent(location.hash.slice(1));run()}});
+if(location.hash.length>1)$('reg').value=decodeURIComponent(location.hash.slice(1));
+run();
+</script></body></html>

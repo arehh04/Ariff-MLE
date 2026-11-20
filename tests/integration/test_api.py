@@ -291,7 +291,7 @@ def test_other_methods_are_405_problem_json(client, method):
 
 
 @pytest.mark.parametrize(
-    "path", ["/v1", "/v1/companies", "/v1/companies/SYN-000101/other", "/healthz/x", "/"]
+    "path", ["/v1", "/v1/companies", "/v1/companies/SYN-000101/other", "/healthz/x", "/nope"]
 )
 def test_unknown_paths_are_404_problem_json(client, path):
     r = client.get(path)
@@ -374,3 +374,10 @@ def test_vectors_from_another_model_are_never_compared(client, conn):
         similar(client)
     )  # a different model's vector is not a neighbour of SYN-000101
     assert similar(client, "SYN-000102").json()["results"] == []  # and it has no same-model neighbours itself
+
+
+def test_the_demo_page_is_served_at_the_root(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "/v1/companies/" in response.text  # the page really calls the API
