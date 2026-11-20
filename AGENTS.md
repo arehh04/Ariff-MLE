@@ -88,7 +88,7 @@ Code runs; tests for it exist, fail when the behaviour is broken, and pass; `ruf
 and outputs; you explained the change in plain language; you listed anything left undone or assumed.
 
 ## Decisions made (by the human; do not re-ask)
-1. Embedding model: lightweight `BAAI/bge-small-en-v1.5` by default; hashing embedder for unit tests and as documented fallback; swap later by model name.
+1. Embedding model: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (MiniLM, 384-d, English+Malay) by default (changed from `bge-small-en-v1.5` after the deep dive: it scored below the hashing placeholder on Malay queries); hashing embedder for unit tests and as documented fallback; swap later by model name.
 2. `company-struck-off`: hidden for role `portal` (default `X-Role`), visible to `analyst`; a newer upsert reactivates. Header is a stub, not auth.
 3. A newer null/empty field never erases an older value. Data prep (IQR length cap, timestamp window, normalisation) flags with warnings and never drops a company.
 4. Timestamps without an offset are Malaysia time (+08:00).

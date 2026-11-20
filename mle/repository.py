@@ -50,14 +50,16 @@ _INSERT_EVENT = """
 INSERT INTO company_events (registration_number, version_hash, message_id, kind, source_updated_at,
     updated_at_missing, has_data, company_name, nature_of_business, state, industry, source, warnings)
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (registration_number, version_hash) DO UPDATE
-SET source = LEAST(company_events.source, EXCLUDED.source)
-WHERE company_events.source IS DISTINCT FROM LEAST(company_events.source, EXCLUDED.source)
-RETURNING (xmax = 0)
+ON CONFLICT (registration_number, version_hash) DO NOTHING
+RETURNING true
 """
 # `source` is not part of version_hash, so redeliveries of the same content may disagree on it. "First delivery wins"
 # would make companies.source depend on arrival order; keeping the smallest non-null value does not (LEAST ignores
-# NULL). The WHERE clause makes an unchanged duplicate write nothing. RETURNING (xmax = 0) is true only for a real insert.
+# NULL). The WHERE clause makes an unchanged duplicate write nothing.
+_MERGE_SOURCE = """
+UPDATE company_events SET source = LEAST(source, %s)
+WHERE registration_number = %s AND version_hash = %s AND source IS DISTINCT FROM LEAST(source, %s)
+"""
 
 # Fold the event log into one row per company. Every field: the value of the NEWEST event that has one.
 # "Newest" = source_updated_at DESC, then version_hash DESC as a fixed tie-break, so equal timestamps resolve
@@ -87,6 +89,17 @@ GROUP BY registration_number
 _EXISTING_EMBEDDINGS = """
 SELECT registration_number, embedding_text_hash, embedding_model, embedding
 FROM companies WHERE registration_number = ANY(%s)
+"""
+
+_KNOWN_EVENTS = """
+SELECT e.registration_number, e.version_hash FROM company_events e
+JOIN unnest(%s::text[], %s::text[]) AS t(registration_number, version_hash)
+  ON e.registration_number = t.registration_number AND e.version_hash = t.version_hash
+"""
+
+_STORED_HASHES = """
+SELECT DISTINCT embedding_text_hash FROM companies
+WHERE embedding_text_hash = ANY(%s) AND embedding_model = %s AND embedding IS NOT NULL
 """
 
 _REUSABLE_VECTORS = """
@@ -141,19 +154,53 @@ def _insert_events(conn: psycopg.Connection, events: list[Event]) -> tuple[int, 
              e.updated_at_missing, e.has_data, e.company_name, e.nature_of_business, e.state, e.industry,
              e.source, list(e.warnings)),
         )  # fmt: skip
-        row = cur.fetchone()  # None: a duplicate that changed nothing
-        new += bool(row and row[0])
+        if cur.fetchone():  # a row came back: really inserted
+            new += 1
+        else:  # a duplicate: only its `source` may still improve
+            conn.execute(_MERGE_SOURCE, (e.source, e.registration_number, e.version_hash, e.source))
     return new, len(events) - new
 
 
+def _prepare_vectors(
+    conn: psycopg.Connection, embedder: Embedder, events: list[Event]
+) -> tuple[dict[str, Vector], int]:
+    """Embed the batch's own new texts BEFORE the transaction, so the slow model never runs while per-company locks are held.
+
+    This is a guess from the events alone (the projected text can differ when older events fill in fields). A wrong or
+    missing guess is harmless: `_plan_embeddings` embeds whatever it still needs, inside the transaction, as before.
+    """
+    known = {  # redeliveries and replays are already in the log: their text was handled when they first arrived
+        tuple(r)
+        for r in conn.execute(
+            _KNOWN_EVENTS, ([e.registration_number for e in events], [e.version_hash for e in events])
+        )
+    }
+    texts = {
+        _text_hash(t): t
+        for e in events
+        if (e.registration_number, e.version_hash) not in known
+        and (t := embedding_source(e.nature_of_business, e.industry, e.company_name)[0])
+    }
+    if not texts:
+        return {}, 0
+    stored = {row[0] for row in conn.execute(_STORED_HASHES, (list(texts), embedder.name)).fetchall()}
+    todo = [digest for digest in texts if digest not in stored]
+    if not todo:
+        return {}, 0
+    vectors = embedder.embed([texts[digest] for digest in todo])
+    if len(vectors) != len(todo):
+        raise RuntimeError("embedder returned a different number of vectors than texts")
+    return {digest: _as_vector(v) for digest, v in zip(todo, vectors, strict=True)}, len(todo)
+
+
 def _plan_embeddings(
-    conn: psycopg.Connection, embedder: Embedder, projected: list[dict]
+    conn: psycopg.Connection, embedder: Embedder, projected: list[dict], prepared: dict[str, Vector]
 ) -> tuple[dict[str, Vector], int]:
     """Decide which companies need a vector. Returns {registration_number: Vector} for those whose row must be
     written with a (possibly reused) vector, plus how many texts were really embedded.
 
     Order of preference: unchanged text+model on the same row (keep) -> identical text already stored (reuse)
-    -> embed, each distinct text once per batch.
+    -> `prepared` (embedded before the transaction) -> embed here, each distinct text once per batch.
     """
     regs = [p["registration_number"] for p in projected]
     existing = {
@@ -178,6 +225,9 @@ def _plan_embeddings(
         for digest, vector in stored:
             for reg in need.pop(digest):
                 vectors[reg] = _as_vector(vector)
+    for digest in [d for d in need if d in prepared]:  # embedded before the transaction
+        for reg in need.pop(digest):
+            vectors[reg] = prepared[digest]
     embedded = 0
     if need:
         order = list(need)
@@ -201,7 +251,8 @@ def process_batch(
     """
     rejects = [m for m in messages if isinstance(m, Rejected)]
     events = [m for m in messages if isinstance(m, Event)]
-    result = BatchResult(rejected=len(rejects))
+    prepared, pre_embedded = _prepare_vectors(conn, embedder, events)
+    result = BatchResult(rejected=len(rejects), embedded=pre_embedded)
     with conn.transaction():
         if rejects:
             _record_rejects(conn, rejects)
@@ -226,7 +277,8 @@ def process_batch(
             p["embedding_text_hash"] = None
             projected.append(p)
 
-        vectors, result.embedded = _plan_embeddings(conn, embedder, projected)
+        vectors, inline = _plan_embeddings(conn, embedder, projected, prepared)
+        result.embedded += inline
         for p in projected:
             vector = vectors.get(p["registration_number"])
             p["embedding"] = vector

@@ -283,3 +283,24 @@ def test_text_that_cannot_be_encoded_rejects_only_that_message(conn, embedder):
     }
     assert conn.execute("SELECT reason FROM rejected_events").fetchall() == [("processing_error",)]
     assert result.rejected == 1
+
+
+def test_company_lock_is_not_held_while_the_model_runs(conn, test_dsn):
+    """Embedding is the slow step. While it runs, another consumer must be able to take this company's lock."""
+    got_lock: list[bool] = []
+
+    class Probe(CountingEmbedder):
+        def embed(self, texts):
+            with psycopg.connect(test_dsn, autocommit=True) as other:
+                got_lock.append(
+                    other.execute(
+                        "SELECT pg_try_advisory_lock(hashtextextended('SYN-000001', 0))"
+                    ).fetchone()[0]
+                )
+                other.execute("SELECT pg_advisory_unlock_all()")
+            return super().embed(texts)
+
+    process_batch(
+        conn, Probe(), [make_event("SYN-000001", TS, companyName="A", natureOfBusiness="a new text")]
+    )
+    assert got_lock == [True]

@@ -16,7 +16,7 @@ A stub for visibility only, not authentication.
     {"registrationNumber": "SYN-000659", "companyName": "...", "natureOfBusiness": "...", "state": "Perak",
      "industry": "Healthcare", "status": "active", "score": 1.0, "updatedAt": "2026-08-14T09:16:31+08:00"}
   ],
-  "meta": {"limit": 10, "returned": 10, "model": "BAAI/bge-small-en-v1.5", "reason": null}
+  "meta": {"limit": 10, "returned": 10, "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", "reason": null}
 }
 ```
 `score` = `1 - cosine distance`, higher is more similar. The company itself is never in `results`.

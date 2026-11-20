@@ -9,7 +9,7 @@ feed -> RabbitMQ[company-events] -> consumer -> Postgres + pgvector <- service (
 
 ## Stack
 Python 3.14 + uv; `aio-pika` (same lib as the producer); `psycopg[binary,pool]` v3 + `pgvector`; FastAPI + pydantic;
-`fastembed` (ONNX, CPU) with `BAAI/bge-small-en-v1.5` (384d) as suggested, a hashing bag-of-words placeholder for
+`fastembed` (ONNX, CPU) with `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (MiniLM, 384d, English+Malay), a hashing bag-of-words placeholder for
 tests/offline (allowed by the brief if documented); pytest + httpx; ruff.
 
 ## Core design (the part to understand deeply)
@@ -46,7 +46,7 @@ tests/offline (allowed by the brief if documented); pytest + httpx; ruff.
 - `/healthz` (process) and `/readyz` (DB reachable).
 
 ## Embedding choice
-Decided: default `bge-small-en-v1.5` (lightweight), hashing embedder for unit tests/offline; swap later by model name. The data is half Malay, so the deep dive compares it with a multilingual
+Decided: default `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (MiniLM; `bge-small-en-v1.5` was the first suggestion but is English-only, see DESIGN.md section 6), hashing embedder for unit tests/offline; swap later by model name. The data is half Malay, so the deep dive compares it with a multilingual
 384-d model (list candidates: `TextEmbedding.list_supported_models()`; the schema fixes `vector(384)`). Store the model name per row.
 
 ## 10x volume (talking points)

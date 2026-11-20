@@ -27,7 +27,7 @@
 5. `state` is unreliable (conflicts with descriptions): store it, normalise casing, do not embed it.
 6. A company with no description is still stored and fetchable; it may have no embedding; the API explains why (200 + reason).
 7. The registry owns the queue: declare it `durable=True`, **no other arguments**; no dead-letter exchange is possible.
-8. Model: default is the lightweight `BAAI/bge-small-en-v1.5` (384-d, CPU); a hashing embedder is used for unit tests and as the
+8. Model: default is `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (MiniLM, 384-d, CPU, English+Malay); a hashing embedder is used for unit tests and as the
    documented fallback if `fastembed` will not install. The model name is stored per row so the model can be swapped later.
 9. Data preparation flags, never deletes: description length outliers (IQR upper fence replaces the fixed cap; expect ~512, verify),
    timestamps outside a sane window around the feed's dates, and normalisation of state and text. Flagged values get a `warnings`

@@ -56,7 +56,7 @@ Not in `docs/02-feed-findings.md`, or different from it:
 | Failure policy | Bad data: reject and ack. Database or model down (`EmbedderUnavailable`): not acked, retried with back-off (1 s doubling to 30 s). A wrong-size model output or a code bug: the consumer stops (fail fast, nothing acked) | A retry loop cannot fix a misconfiguration, and stopping loses nothing because nothing was acked | Retry everything, or reject everything |
 | Text hygiene | Lone surrogates (valid JSON like `"\ud800"`, not encodable as UTF-8) become U+FFFD; NUL is dropped; only the first 20,000 characters of a field are examined; phrases of 8-256 characters repeated 3+ times collapse to one copy | One such message used to crash the consumer; the unbounded repeat regex took 8 s on 20,000 characters | Reject the whole message; unbounded regex |
 | Concurrency | `pg_advisory_xact_lock(hashtextextended(reg, 0))` per company, taken in sorted order | Two consumers cannot project from a snapshot that misses the other's uncommitted event; sorted order prevents deadlock | No lock (fails the concurrency test), table lock (serialises everything) |
-| Batching | Up to 100 messages or 0.2 s, one transaction | Fewer round trips; each distinct text embedded once per batch | One transaction per message |
+| Batching | Up to 100 messages or 0.2 s, one transaction; the batch's new texts are embedded *before* the transaction (a guess from the events alone; anything the guess misses is embedded inside, as before) | Fewer round trips; each distinct text embedded once per batch; the slow model never runs while per-company locks are held (tested) | One transaction per message |
 | Embedding reuse | Same text and model keeps the stored vector; identical text elsewhere reuses its vector; otherwise embed | The feed has ~172 distinct texts for 2,000 companies | Embed every message |
 | Struck-off | Company kept with `status`; default role `portal` hides it (including as the subject, 404), `analyst` sees it; a newer upsert reactivates | Deregistered is not "lost"; role is a stub header, not auth | Delete the row |
 | Query shape | Inner `ORDER BY embedding <=> $vector LIMIT pool` (keeps the HNSW index usable), outer sort by distance, same state, registration number; `hnsw.ef_search = 200`; only rows with the same `embedding_model` as the query company are compared | Filters after the index scan would otherwise defeat it; the outer sort makes ties deterministic; cosine distance between two different models means nothing | Filter and tie-break in one query (planner stops using the index) |
@@ -100,19 +100,21 @@ That is the long-lived dev database, which has had several publishes, hence `see
 following the README once (publish once, consumer drained), gives the same output with `seen_count sum 21` and exit 0.
 The "expected" side is a separate plain-Python fold of the feed (not the production SQL), so the two can disagree.
 
-**Tests and checks:** `uv run ruff check .` clean, `ruff format --check` clean (56 files), `uv run pytest -q`: **652 passed**
-in 187.6 s, none skipped. They include seeded randomised event histories checked against the same independent fold, shuffle
+**Tests and checks:** `uv run ruff check .` clean, `ruff format --check` clean (56 files), `uv run pytest -q`: **653 passed**
+in 201.1 s, none skipped. They include seeded randomised event histories checked against the same independent fold, shuffle
 and replay proofs, a threaded concurrency test, fuzzing of the parser, API matrices (roles, filters, errors, outage), and
 consumer tests against a real RabbitMQ (ack order, crash leaves the queue intact). Unit tests alone (`pytest tests/unit`) pass
 with Postgres and RabbitMQ unreachable (354 passed). In CI a missing service fails the run instead of skipping.
 
 **Mutation checks** (break the code on purpose, see red, restore, see green; all run in this session on the final code):
+- Count every event as new, or skip merging `source` on a duplicate (`mle/repository.py`): the oracle tests fail (the first mutant stopped at its first failure, the second failed 4 seeds); the write-path tests pass restored.
 - Remove the per-company advisory lock (`mle/repository.py`): the concurrency tests fail in 3 of 3 runs (4, 4 and 3 of 4 tests fail); all 4 pass restored.
 - Ack before the write (`mle/consumer.py`): both new broker tests fail. Swallow the write error and ack anyway: the crash test fails.
 - Drop the `embedding_model` filter from the similarity query: `test_vectors_from_another_model_are_never_compared` fails.
 - Make reconcile ignore wrong values: 2 tests fail. Make it ignore undercounted rejects: 1 test fails. All 12 pass restored.
-- New tests written before their fix and seen failing first: lone surrogates in six fields (6 failed), the quadratic repeat regex (8 s on
+- New tests written before their fix and seen failing first: the company lock held during embedding (`[False]` instead of `[True]`), lone surrogates in six fields (6 failed), the quadratic repeat regex (8 s on
   20,000 characters), an unencodable text in the isolated retry path, and a model failure that must be retried.
+- Embedding before the transaction first re-embedded redelivered old events on a replay; the existing `test_replaying_the_feed_changes_nothing` failed (3 cases) and caught it. The fix: only events not already in the log are considered.
 - Earlier, the randomised oracle found two real defects, both fixed: `source` depended on arrival order, and an industry filter value
   with surrounding whitespace was not stripped before matching (`test_industry_filter_ignores_case_and_padding`).
 
@@ -205,10 +207,7 @@ Reasoning from the measurements above; I did not run a 10x test.
 - Load and chaos tests: no 10x run, no broker or database kill during a long run; consumer shutdown during a real database outage is only unit tested.
 - Fixing the tie-group limit in section 7.
 - Test suite speed (about 3 minutes); image size (1.1 GB, mostly the model and the virtualenv).
-- Embedding runs while the per-company advisory locks are held (`process_batch`), so a slow model lengthens lock time for other consumers touching the same company. Moving it outside the lock needs the projected text, so it is not a small change; not done.
-- `RETURNING (xmax = 0)` (`_INSERT_EVENT`) tells a new row from a conflict using a Postgres internal. It only feeds a statistic, so I left it.
 - No test restarts the broker mid-run, and the consumer is only unit tested through a database outage.
-- `AGENTS.md` and some `docs/` still name `bge-small` as the default; the code default is the multilingual model (section 6).
 - Quality evidence is on 172 short template-like texts with business-type labels I wrote; no human relevance judgement.
 
 ## 9. AI tools used
