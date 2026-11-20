@@ -17,3 +17,7 @@ down:
 # Replay the registry feed onto the company-events queue.
 publish:
     uv run python -m producer.publish
+
+# Run the consumer: queue -> Postgres + pgvector (Ctrl-C finishes the current batch, then exits).
+consume:
+    uv run python -m mle.consumer

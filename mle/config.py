@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     database_url: str = Field(default_factory=_default_database_url)
     rabbitmq_url: str = Field(default_factory=_default_rabbitmq_url)
     embedder: str = "fastembed"  # "fastembed" (real model) or "hashing" (offline placeholder)
+    batch_size: int = 100  # messages per Postgres transaction
+    batch_wait_seconds: float = 0.2  # flush a partial batch after this long
     embedding_model: str = "BAAI/bge-small-en-v1.5"  # used by "fastembed"; must output 384 dimensions
 
 
