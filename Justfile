@@ -21,3 +21,7 @@ publish:
 # Run the consumer: queue -> Postgres + pgvector (Ctrl-C finishes the current batch, then exits).
 consume:
     uv run python -m mle.consumer
+
+# Run the API on http://localhost:8000
+serve:
+    uv run uvicorn mle.api:create_app --factory --port 8000

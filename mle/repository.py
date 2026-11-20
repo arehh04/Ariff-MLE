@@ -253,3 +253,66 @@ def process_batch_isolated(
             raw = json.dumps({"error": f"{type(exc).__name__}: {exc}", "event": asdict(message)}, default=str)
             total += process_batch(conn, embedder, [Rejected(message.message_id, "processing_error", raw)])
     return total
+
+
+# ---- read path (used by the API) -------------------------------------------------------------------------------
+
+_GET_COMPANY = """
+SELECT registration_number, company_name, nature_of_business, state, industry, status, source,
+       source_updated_at, updated_at_missing, embedding_status, embedding_model, embedding
+FROM companies WHERE registration_number = %s
+"""
+
+# The query vector arrives as a PARAMETER (fetched first by get_company), so the planner sees a constant and can use
+# the HNSW index. Extra ORDER BY keys would stop it using the index, so the inner query orders by distance ONLY and
+# takes the `pool` nearest rows; the outer query then breaks ties (the feed has many identical descriptions):
+# same state first, then registration number. Safe while `pool` exceeds the biggest tie group (~43 in the feed).
+_SIMILAR = """
+SELECT registration_number, company_name, nature_of_business, state, industry, status, source_updated_at,
+       updated_at_missing, 1 - distance AS score
+FROM (
+    SELECT registration_number, company_name, nature_of_business, state, industry, status, source_updated_at,
+           updated_at_missing, embedding <=> %(q)s AS distance
+    FROM companies
+    WHERE embedding IS NOT NULL
+      AND registration_number <> %(reg)s
+      AND (%(include_struck_off)s OR status = 'active')
+      AND (%(state)s::text IS NULL OR state = %(state)s)
+      AND (%(industry)s::text IS NULL OR lower(industry) = lower(%(industry)s))
+    ORDER BY embedding <=> %(q)s
+    LIMIT %(pool)s
+) nearest
+ORDER BY distance, coalesce(state = %(own_state)s, false) DESC, registration_number
+LIMIT %(limit)s
+"""
+_EF_SEARCH = 200  # pgvector returns at most this many rows per index scan, so a bigger pool would not help
+
+
+def _dicts(cur: psycopg.Cursor) -> list[dict]:
+    names = [c.name for c in cur.description]
+    return [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
+
+
+def get_company(conn: psycopg.Connection, registration_number: str) -> dict | None:
+    rows = _dicts(conn.execute(_GET_COMPANY, (registration_number,)))
+    return rows[0] if rows else None
+
+
+def similar(
+    conn: psycopg.Connection,
+    company: dict,
+    limit: int,
+    state: str | None,
+    industry: str | None,
+    include_struck_off: bool,
+) -> list[dict]:
+    """Top `limit` companies closest to `company` by cosine distance. `company` comes from get_company()."""
+    with conn.transaction():
+        # Filters are applied after the index scan, so look at more candidates than the default 40 to still fill `limit`.
+        conn.execute("SET LOCAL hnsw.ef_search = 200")  # keep equal to _EF_SEARCH
+        params = {
+            "q": company["embedding"], "reg": company["registration_number"], "own_state": company["state"],
+            "include_struck_off": include_struck_off, "state": state, "industry": industry, "limit": limit,
+            "pool": min(_EF_SEARCH, max(100, 4 * limit)),
+        }  # fmt: skip
+        return _dicts(conn.execute(_SIMILAR, params))
