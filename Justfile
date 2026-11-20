@@ -29,3 +29,7 @@ serve:
 # Diff the database against an independent fold of the feed (exit 1 on mismatch). Run after `just publish`.
 reconcile:
     uv run python -m scripts.reconcile
+
+# Build the container image (API and consumer share it).
+build:
+    docker build -t mle:latest .

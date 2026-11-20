@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+.codegraph
+.claude
+.pytest_cache
+.ruff_cache
+__pycache__
+*.py[cod]
+.env
+.env.*
+tests
+scripts
+docs
+prompts
+data
